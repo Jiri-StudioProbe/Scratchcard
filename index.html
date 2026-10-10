@@ -1,0 +1,466 @@
+<!doctype html>
+<!--
+  Daily Scratchcard: Technical POC (see PRD). Single file, no dependencies.
+
+  Decisions made:
+  - Covered area is controlled by one class, `.scratch-target`, on the card body wrapper.
+    To cover only the extract later, move that class (and the canvas) to the extract element.
+  - Canvas is sized to the card body with getBoundingClientRect() x devicePixelRatio. A
+    ResizeObserver re-sizes it when content/images change the body size. Existing scratch
+    progress is carried over and any newly added area is covered with fresh paper, so a resize
+    never "un-scratches" or reveals anything. Paper is only fully repainted on a new card.
+  - Long extracts: the card grows naturally (no internal scroll, because the canvas uses
+    touch-action: none and would trap the finger). Scroll the page by dragging on the margins,
+    buttons or footer.
+  - Thumbnail space is reserved via aspect-ratio from the API's width/height to avoid layout jump.
+  - Api-User-Agent is sent as a courtesy. If the browser blocks it (CORS preflight), the request is
+    retried without it and the header is dropped for the rest of the session.
+  - Scratch % counts a sampled pixel as scratched when its alpha is below 128. Measure only, no
+    behaviour change at any percentage.
+  - Read more link is never gated; it is only inert before the first card has loaded (nothing to
+    link to yet).
+  - Tiny tap = small dot (a tap with no movement still scratches a circle). Strokes use
+    getCoalescedEvents() when available for smoother fast swipes.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#3f7f8c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Scratchcard">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Daily Scratchcard</title>
+<style>
+  :root {
+    --page-bg: #3f7f8c;
+    --card-bg: #ffffff;
+    --ink: #1d2a2e;
+    --muted: #5d6b70;
+    --accent: #f2b134;
+    --accent-ink: #2a1d00;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--page-bg);
+    color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .app {
+    min-height: 100dvh;
+    max-width: 480px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding:
+      calc(16px + env(safe-area-inset-top))
+      calc(16px + env(safe-area-inset-right))
+      calc(12px + env(safe-area-inset-bottom))
+      calc(16px + env(safe-area-inset-left));
+  }
+  main { flex: 1 0 auto; display: flex; flex-direction: column; gap: 16px; }
+
+  .card {
+    background: var(--card-bg);
+    border-radius: 18px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .28);
+    overflow: hidden;
+    transition: opacity .15s;
+  }
+  .card.loading { opacity: .45; }
+
+  /* The thing hidden under the paper. One class, easy to move later. */
+  .scratch-target { position: relative; }
+  .card-content { padding: 16px; }
+
+  .thumb {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 260px;
+    object-fit: cover;
+    border-radius: 10px;
+    margin-bottom: 14px;
+    background: #e6ebec;
+  }
+  .title { margin: 0; font-size: 1.5rem; line-height: 1.2; }
+  .desc { margin: 4px 0 0; color: var(--muted); font-style: italic; }
+  .extract { margin: 12px 0 0; }
+
+  canvas#paper {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    cursor: crosshair;
+  }
+
+  .state {
+    padding: 48px 24px;
+    text-align: center;
+    color: var(--muted);
+  }
+  .state strong { display: block; color: var(--ink); font-size: 1.15rem; margin-bottom: 14px; }
+
+  .actions { display: flex; gap: 12px; }
+  .btn {
+    flex: 1;
+    min-height: 52px;
+    padding: 0 16px;
+    border-radius: 14px;
+    border: 2px solid rgba(255, 255, 255, .85);
+    background: transparent;
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn:disabled, .btn[aria-disabled="true"] { opacity: .5; pointer-events: none; }
+  .state .btn { display: inline-flex; flex: none; padding: 0 24px; background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+  .debug { text-align: center; font-size: 12px; color: rgba(255, 255, 255, .6); min-height: 1.2em; font-variant-numeric: tabular-nums; }
+  footer { text-align: center; font-size: 12px; color: rgba(255, 255, 255, .75); }
+  footer a { color: inherit; }
+
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+  <main>
+    <section class="card loading" id="card" aria-live="polite">
+      <div class="scratch-target" id="target">
+        <div class="card-content" id="content"></div>
+        <canvas id="paper" aria-hidden="true"></canvas>
+      </div>
+      <div class="state" id="error" hidden>
+        <strong>Couldn't fetch a card</strong>
+        <button class="btn" id="retry" type="button">Try again</button>
+      </div>
+    </section>
+
+    <div class="actions" id="actions">
+      <a class="btn primary" id="readMore" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true">Read more</a>
+      <button class="btn" id="newCard" type="button" disabled>New card</button>
+    </div>
+    <div class="debug" id="debug" aria-hidden="true"></div>
+  </main>
+
+  <footer>Content from <a id="source" href="https://en.wikipedia.org/" target="_blank" rel="noopener noreferrer">Wikipedia</a>, CC BY-SA 4.0</footer>
+</div>
+
+<script>
+"use strict";
+
+// ---- Config ---------------------------------------------------------------
+const API_URL = "https://en.wikipedia.org/api/rest_v1/page/random/summary";
+const API_USER_AGENT = "DailyScratchcardPOC/0.1 (personal prototype)";
+const MAX_ATTEMPTS = 3;
+
+const BRUSH_WIDTH = 28;          // CSS px
+const PAPER_COLOR = "#f2f2ee";
+const HINT_TEXT = "SCRATCH HERE";
+const PROGRESS_STEP = 8;         // sample every Nth backing-store pixel
+const SCRATCHED_ALPHA = 128;     // alpha below this counts as scratched
+
+// ---- Elements -------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const card = $("card"), target = $("target"), content = $("content"), canvas = $("paper");
+const errorBox = $("error"), actions = $("actions"), debugEl = $("debug");
+const readMore = $("readMore"), newCardBtn = $("newCard"), retryBtn = $("retry"), sourceLink = $("source");
+const ctx = canvas.getContext("2d");
+
+let useApiUserAgent = true;
+let loadToken = 0;
+
+// ---- Data -----------------------------------------------------------------
+async function fetchOnce() {
+  const init = { cache: "no-store" };
+  if (useApiUserAgent) init.headers = { "Api-User-Agent": API_USER_AGENT };
+  let res;
+  try {
+    res = await fetch(API_URL, init);
+  } catch (err) {
+    if (!useApiUserAgent) throw err;
+    // Possibly a CORS preflight rejection of the courtesy header: drop it and retry once.
+    useApiUserAgent = false;
+    res = await fetch(API_URL, { cache: "no-store" });
+  }
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
+const isValid = (d) => d && d.type !== "disambiguation" && typeof d.extract === "string" && d.extract.trim() !== "";
+
+async function fetchCard() {
+  let lastErr = new Error("No valid article");
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    try {
+      const data = await fetchOnce();
+      if (isValid(data)) return data;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+// ---- Rendering ------------------------------------------------------------
+function renderCard(d) {
+  content.replaceChildren();
+  if (d.thumbnail && d.thumbnail.source) {
+    const img = document.createElement("img");
+    img.className = "thumb";
+    img.alt = "";
+    img.decoding = "async";
+    if (d.thumbnail.width && d.thumbnail.height) img.style.aspectRatio = d.thumbnail.width + " / " + d.thumbnail.height;
+    img.src = d.thumbnail.source;
+    content.append(img);
+  }
+  const h = document.createElement("h1");
+  h.className = "title";
+  h.textContent = d.title || "Untitled";
+  content.append(h);
+  if (d.description) {
+    const p = document.createElement("p");
+    p.className = "desc";
+    p.textContent = d.description;
+    content.append(p);
+  }
+  const ex = document.createElement("p");
+  ex.className = "extract";
+  ex.textContent = d.extract;
+  content.append(ex);
+
+  const url = (d.content_urls && d.content_urls.mobile && d.content_urls.mobile.page) ||
+              (d.content_urls && d.content_urls.desktop && d.content_urls.desktop.page) || "";
+  if (url) {
+    readMore.href = url;
+    readMore.removeAttribute("aria-disabled");
+    sourceLink.href = url;
+  }
+}
+
+function setBusy(busy) {
+  card.classList.toggle("loading", busy);
+  newCardBtn.disabled = busy;
+}
+
+async function loadCard() {
+  const token = ++loadToken;
+  setBusy(true);
+  newCardBtn.textContent = "Shuffling…";
+  try {
+    const data = await fetchCard();
+    if (token !== loadToken) return;
+    errorBox.hidden = true;
+    target.hidden = false;
+    actions.hidden = false;
+    renderCard(data);
+    paintPaper();
+    setProgress(0, false);
+  } catch (err) {
+    if (token !== loadToken) return;
+    console.error("Card fetch failed:", err);
+    target.hidden = true;
+    actions.hidden = true;
+    errorBox.hidden = false;
+    debugEl.textContent = "";
+  } finally {
+    if (token === loadToken) {
+      newCardBtn.textContent = "New card";
+      setBusy(false);
+    }
+  }
+}
+
+// ---- Paper ----------------------------------------------------------------
+let cssW = 0, cssH = 0, dpr = 1;
+
+function sizeCanvas() {
+  const r = target.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  cssW = r.width;
+  cssH = r.height;
+  canvas.width = Math.max(1, Math.round(cssW * dpr));
+  canvas.height = Math.max(1, Math.round(cssH * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawPaper(w, h, x0 = 0, y0 = 0) {
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = PAPER_COLOR;
+  ctx.fillRect(x0, y0, w, h);
+  // speckle
+  const n = Math.round((w * h) / 10);
+  for (let i = 0; i < n; i++) {
+    const v = Math.random() < 0.5 ? 0 : 255;
+    ctx.fillStyle = "rgba(" + v + "," + v + "," + v + "," + (Math.random() * 0.07).toFixed(3) + ")";
+    const s = Math.random() < 0.15 ? 2 : 1;
+    ctx.fillRect(x0 + Math.random() * w, y0 + Math.random() * h, s, s);
+  }
+  // a few soft fibres
+  ctx.lineWidth = 0.6;
+  for (let i = 0; i < Math.round((w * h) / 2500); i++) {
+    const x = x0 + Math.random() * w, y = y0 + Math.random() * h, a = Math.random() * Math.PI;
+    ctx.strokeStyle = "rgba(120,110,90," + (0.04 + Math.random() * 0.06).toFixed(3) + ")";
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + Math.cos(a) * 6, y + Math.sin(a) * 6);
+    ctx.stroke();
+  }
+}
+
+function drawHint() {
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = "rgba(150,150,145,.6)";
+  ctx.font = "600 15px system-ui, -apple-system, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(HINT_TEXT.split("").join(" "), cssW / 2, cssH / 2);
+}
+
+// Full repaint: only on load and when a new card loads.
+function paintPaper() {
+  sizeCanvas();
+  drawPaper(cssW, cssH);
+  drawHint();
+}
+
+// Content size changed (images loaded, rotation, ...): keep progress, cover any new area.
+function resizeKeepingProgress() {
+  if (target.hidden) return;
+  const r = target.getBoundingClientRect();
+  if (Math.abs(r.width - cssW) < 0.5 && Math.abs(r.height - cssH) < 0.5 && dpr === (window.devicePixelRatio || 1)) return;
+
+  const oldW = cssW, oldH = cssH;
+  const hadPaper = canvas.width > 1 && oldW > 0;
+
+  // mask = black where the old paper had been scratched away
+  let mask = null;
+  if (hadPaper) {
+    mask = document.createElement("canvas");
+    mask.width = canvas.width;
+    mask.height = canvas.height;
+    const m = mask.getContext("2d");
+    m.fillStyle = "#000";
+    m.fillRect(0, 0, mask.width, mask.height);
+    m.globalCompositeOperation = "destination-out";
+    m.drawImage(canvas, 0, 0);
+  }
+
+  sizeCanvas();
+  drawPaper(cssW, cssH);
+  drawHint();
+  if (mask) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "destination-out";
+    // draw the old mask at its original CSS size, anchored top-left
+    ctx.drawImage(mask, 0, 0, mask.width, mask.height, 0, 0, oldW * dpr, oldH * dpr);
+    ctx.restore();
+  }
+}
+
+new ResizeObserver(resizeKeepingProgress).observe(target);
+content.addEventListener("load", (e) => { if (e.target.tagName === "IMG") resizeKeepingProgress(); }, true);
+
+// ---- Scratching -----------------------------------------------------------
+let activeId = null, last = null, bounds = null;
+
+function localPoint(e) {
+  return { x: e.clientX - bounds.left, y: e.clientY - bounds.top };
+}
+
+function beginErase() {
+  ctx.globalCompositeOperation = "destination-out";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = BRUSH_WIDTH;
+  ctx.strokeStyle = "#000";
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (activeId !== null) return;
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  activeId = e.pointerId;
+  canvas.setPointerCapture(e.pointerId);
+  bounds = canvas.getBoundingClientRect();
+  last = localPoint(e);
+  beginErase();
+  ctx.beginPath();
+  ctx.moveTo(last.x, last.y);
+  ctx.lineTo(last.x, last.y); // zero-length round-capped segment = a dot on tap
+  ctx.stroke();
+  e.preventDefault();
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (e.pointerId !== activeId) return;
+  const events = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
+  if (!events.length) events.push(e);
+  beginErase();
+  ctx.beginPath();
+  ctx.moveTo(last.x, last.y);
+  for (const ev of events) {
+    last = localPoint(ev);
+    ctx.lineTo(last.x, last.y);
+  }
+  ctx.stroke();
+  e.preventDefault();
+});
+
+function endStroke(e) {
+  if (e.pointerId !== activeId) return;
+  activeId = null;
+  last = null;
+  if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+  if (e.type === "pointerup") measureProgress();
+}
+canvas.addEventListener("pointerup", endStroke);
+canvas.addEventListener("pointercancel", endStroke);
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// ---- Progress (measure only) ---------------------------------------------
+function setProgress(pct, log = true) {
+  debugEl.textContent = pct + "% scratched";
+  if (log) console.log(pct + "% scratched");
+}
+
+function measureProgress() {
+  const { width, height } = canvas;
+  const data = ctx.getImageData(0, 0, width, height).data;
+  let total = 0, cleared = 0;
+  for (let y = 0; y < height; y += PROGRESS_STEP) {
+    for (let x = 0; x < width; x += PROGRESS_STEP) {
+      total++;
+      if (data[(y * width + x) * 4 + 3] < SCRATCHED_ALPHA) cleared++;
+    }
+  }
+  setProgress(total ? Math.round((cleared / total) * 100) : 0);
+}
+
+// ---- Wiring ---------------------------------------------------------------
+newCardBtn.addEventListener("click", loadCard);
+retryBtn.addEventListener("click", loadCard);
+readMore.addEventListener("click", (e) => { if (readMore.getAttribute("aria-disabled") === "true") e.preventDefault(); });
+
+loadCard();
+</script>
+</body>
+</html>
