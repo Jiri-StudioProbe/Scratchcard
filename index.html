@@ -266,7 +266,7 @@ const TREE = [
   ["Science & Nature", [
     ["Space", [
       ["Planets", "Planets of the Solar System"],
-      ["Moons", "Natural satellites of the Solar System"],
+      ["Moons", "Moons"],
       ["Black holes", "Black holes"],
       ["Space probes", "Space probes"],
     ]],
@@ -338,7 +338,7 @@ const TREE = [
       ["Renaissance", "Renaissance"],
       ["Age of Discovery", "Age of Discovery"],
       ["Industrial Revolution", "Industrial Revolution"],
-      ["Space Race", "Space Race"],
+      ["Apollo program", "Apollo program"],
     ]],
   ]],
   ["Places & Travel", [
@@ -349,9 +349,9 @@ const TREE = [
       ["Canyons", "Canyons"],
     ]],
     ["Cities", [
-      ["European capitals", "Capitals in Europe"],
-      ["Asian capitals", "Capitals in Asia"],
-      ["African capitals", "Capitals in Africa"],
+      ["Ancient cities", "Ancient cities"],
+      ["Medieval cities", "Medieval cities"],
+      ["Underground cities", "Underground cities"],
       ["Ghost towns", "Ghost towns"],
     ]],
     ["Landmarks", [
@@ -361,7 +361,7 @@ const TREE = [
       ["Ruins", "Ruins"],
     ]],
     ["Islands", [
-      ["Caribbean", "Islands of the Caribbean"],
+      ["Caribbean", "Caribbean islands"],
       ["Greek islands", "Islands of Greece"],
       ["Pacific", "Islands of the Pacific Ocean"],
       ["Arctic", "Islands of the Arctic Ocean"],
@@ -430,7 +430,7 @@ const TREE = [
       ["Tennis", "Tennis"],
       ["Golf", "Golf"],
       ["Boxing", "Boxing"],
-      ["Athletics", "Athletics (track and field)"],
+      ["Track and field", "Track and field"],
     ]],
     ["Outdoors", [
       ["Mountaineering", "Mountaineering"],
@@ -579,6 +579,10 @@ async function searchTitles(leaf) {
     srnamespace: "0", srlimit: String(CANDIDATES_PER_SEARCH), srsort: "random", srprop: "",
   });
   const j = await getJSON(ACTION_URL + "?" + params);
+  if (j.warnings) { // e.g. "Deep category query returned too many categories": results are junk
+    console.warn("search warning for", leaf.cat, j.warnings);
+    return [];
+  }
   return ((j.query && j.query.search) || []).map((r) => r.title);
 }
 
