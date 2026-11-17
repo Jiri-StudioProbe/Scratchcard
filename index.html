@@ -24,11 +24,13 @@
 
   Interests + history (v2):
   - Interests are a hand-written 3-level tree (TREE): broad theme > narrower > narrowest. Only the
-    narrowest level maps to a Wikipedia category, because broad categories blow past CirrusSearch's
-    deepcategory limit and return junk. A selected broad/mid node expands to a random leaf under it.
-  - Cards for an interest: list=search with deepcategory:"<leaf>" and srsort=random gives titles,
-    then the REST summary endpoint gives the card (so rendering and validity checks are unchanged).
-    Anything that fails falls back to the plain random summary, so the app never dead-ends.
+    narrowest level (leaf) carries 1-2 seed article titles. A selected broad/mid node expands to a
+    random leaf under it. (Wikipedia categories were tried first and rejected: deepcategory search
+    leaks across the whole category graph and returned unrelated articles for most leaves.)
+  - Cards for a leaf: list=search with morelike:<seeds> at a random offset gives similar article
+    titles (list/outline/timeline pages skipped), then the REST summary endpoint gives the card
+    (so rendering and validity checks are unchanged). morelike ignores srsort=random, hence the
+    random offset. Anything that fails falls back to the plain random summary.
   - EXPLORE_RATE of cards are plain random Wikipedia, regardless of interests.
   - History entry per card: shown -> read (Read more tapped) or ignored (New card tapped without
     Read more). Cards left behind by closing the page stay "shown". Max scratch % is stored too.
@@ -246,7 +248,8 @@ const SUGGEST_EVERY = 3;         // show "More like this?" after this many cards
 const SUGGESTION_COUNT = 6;
 const EXPLORE_RATE = 0.15;       // share of cards that ignore interests (plain random)
 const CANDIDATES_PER_SEARCH = 20;
-const SEARCH_MODE = "deepcategory"; // CirrusSearch keyword; "incategory" = direct members only
+const MAX_OFFSET = 300;           // random sroffset range for morelike results (multiples of CANDIDATES_PER_SEARCH)
+const SKIP_TITLE = /^(List|Lists|Outline|Timeline|Index|Glossary) of /;
 const HISTORY_MAX = 500;
 const HISTORY_SHOWN = 100;       // rows in the History screen
 const STORE_KEY = "scratchcard.v1";
@@ -261,66 +264,67 @@ const ctx = canvas.getContext("2d");
 
 
 // ---- Taxonomy -------------------------------------------------------------
-// node = [label, children[]] or [label, "Wikipedia category"] for a leaf.
+// node = [label, children[]] or [label, "Seed article|Seed article"] for a leaf.
+// Seeds are real Wikipedia article titles; cards are articles similar to them (CirrusSearch morelike:).
 const TREE = [
   ["Science & Nature", [
     ["Space", [
-      ["Planets", "Planets of the Solar System"],
-      ["Moons", "Moons"],
-      ["Black holes", "Black holes"],
-      ["Space probes", "Space probes"],
+      ["Planets", "Planet|Solar System"],
+      ["Moons", "Natural satellite|Moon"],
+      ["Black holes", "Black hole"],
+      ["Space probes", "Space probe|Voyager 1"],
     ]],
     ["Animals", [
-      ["Dinosaurs", "Dinosaurs"],
-      ["Sharks", "Sharks"],
-      ["Birds of prey", "Birds of prey"],
-      ["Primates", "Primates"],
+      ["Dinosaurs", "Dinosaur|Tyrannosaurus"],
+      ["Sharks", "Shark"],
+      ["Birds of prey", "Bird of prey|Eagle"],
+      ["Primates", "Primate|Chimpanzee"],
     ]],
     ["Earth", [
-      ["Volcanoes", "Volcanoes"],
-      ["Earthquakes", "Earthquakes"],
-      ["Minerals", "Minerals"],
-      ["Glaciers", "Glaciers"],
+      ["Volcanoes", "Volcano|Mount Vesuvius"],
+      ["Earthquakes", "Earthquake"],
+      ["Minerals", "Mineral|Quartz"],
+      ["Glaciers", "Glacier"],
     ]],
     ["Matter & energy", [
-      ["Particle physics", "Particle physics"],
+      ["Particle physics", "Particle physics|Standard Model"],
       ["Quantum mechanics", "Quantum mechanics"],
-      ["Chemical elements", "Chemical elements"],
-      ["Thermodynamics", "Thermodynamics"],
+      ["Chemical elements", "Chemical element|Periodic table"],
+      ["Thermodynamics", "Thermodynamics|Entropy"],
     ]],
   ]],
   ["Technology & Engineering", [
     ["Computing", [
-      ["Programming languages", "Programming languages"],
-      ["Operating systems", "Operating systems"],
-      ["Artificial intelligence", "Artificial intelligence"],
-      ["Cryptography", "Cryptography"],
+      ["Programming languages", "Programming language|Python (programming language)"],
+      ["Operating systems", "Operating system|Linux"],
+      ["Artificial intelligence", "Artificial intelligence|Machine learning"],
+      ["Cryptography", "Cryptography|Public-key cryptography"],
     ]],
     ["Transport", [
-      ["Aviation history", "History of aviation"],
-      ["Locomotives", "Locomotives"],
-      ["Ships", "Ship types"],
-      ["Car makers", "Automobile manufacturers"],
+      ["Aviation history", "History of aviation|Wright brothers"],
+      ["Locomotives", "Steam locomotive|Locomotive"],
+      ["Ships", "Ship|Ocean liner"],
+      ["Car makers", "Automobile|History of the automobile"],
     ]],
     ["Energy", [
-      ["Nuclear power", "Nuclear power"],
-      ["Renewables", "Renewable energy"],
-      ["Oil & gas", "Petroleum industry"],
-      ["Electric power", "Electric power"],
+      ["Nuclear power", "Nuclear power|Nuclear reactor"],
+      ["Renewables", "Renewable energy|Solar power"],
+      ["Oil & gas", "Petroleum|Natural gas"],
+      ["Electric power", "Electric power|Electrical grid"],
     ]],
     ["Structures", [
-      ["Bridges", "Bridges"],
-      ["Skyscrapers", "Skyscrapers"],
-      ["Dams", "Dams"],
-      ["Lighthouses", "Lighthouses"],
+      ["Bridges", "Bridge|Suspension bridge"],
+      ["Skyscrapers", "Skyscraper|Burj Khalifa"],
+      ["Dams", "Dam|Hoover Dam"],
+      ["Lighthouses", "Lighthouse"],
     ]],
   ]],
   ["History", [
     ["Ancient world", [
-      ["Ancient Egypt", "Ancient Egypt"],
-      ["Ancient Rome", "Ancient Rome"],
-      ["Ancient Greece", "Ancient Greece"],
-      ["Mesopotamia", "Mesopotamia"],
+      ["Ancient Egypt", "Ancient Egypt|Pharaoh"],
+      ["Ancient Rome", "Ancient Rome|Roman Empire"],
+      ["Ancient Greece", "Ancient Greece|Classical Athens"],
+      ["Mesopotamia", "Mesopotamia|Babylon"],
     ]],
     ["Middle Ages", [
       ["Crusades", "Crusades"],
@@ -331,144 +335,144 @@ const TREE = [
     ["Wars", [
       ["World War I", "World War I"],
       ["World War II", "World War II"],
-      ["Napoleonic Wars", "Napoleonic Wars"],
+      ["Napoleonic Wars", "Napoleonic Wars|Napoleon"],
       ["Cold War", "Cold War"],
     ]],
     ["Ideas & discovery", [
       ["Renaissance", "Renaissance"],
       ["Age of Discovery", "Age of Discovery"],
       ["Industrial Revolution", "Industrial Revolution"],
-      ["Apollo program", "Apollo program"],
+      ["Apollo program", "Apollo program|Apollo 11"],
     ]],
   ]],
   ["Places & Travel", [
     ["Natural wonders", [
-      ["Waterfalls", "Waterfalls"],
-      ["Caves", "Caves"],
-      ["Deserts", "Deserts"],
-      ["Canyons", "Canyons"],
+      ["Waterfalls", "Waterfall|Niagara Falls"],
+      ["Caves", "Cave|Karst"],
+      ["Deserts", "Desert|Sahara"],
+      ["Canyons", "Canyon|Grand Canyon"],
     ]],
     ["Cities", [
-      ["Ancient cities", "Ancient cities"],
-      ["Medieval cities", "Medieval cities"],
-      ["Underground cities", "Underground cities"],
-      ["Ghost towns", "Ghost towns"],
+      ["Ancient cities", "Pompeii|Petra"],
+      ["Medieval cities", "Carcassonne|Bruges"],
+      ["Underground cities", "Derinkuyu underground city"],
+      ["Ghost towns", "Ghost town|Bodie, California"],
     ]],
     ["Landmarks", [
-      ["Pyramids", "Pyramids"],
-      ["Palaces", "Palaces"],
-      ["Monasteries", "Monasteries"],
-      ["Ruins", "Ruins"],
+      ["Pyramids", "Pyramid|Great Pyramid of Giza"],
+      ["Palaces", "Palace|Palace of Versailles"],
+      ["Monasteries", "Monastery|Meteora"],
+      ["Ruins", "Archaeological site|Angkor Wat"],
     ]],
     ["Islands", [
-      ["Caribbean", "Caribbean islands"],
-      ["Greek islands", "Islands of Greece"],
-      ["Pacific", "Islands of the Pacific Ocean"],
-      ["Arctic", "Islands of the Arctic Ocean"],
+      ["Caribbean", "Caribbean|Cuba"],
+      ["Greek islands", "Greek islands|Crete"],
+      ["Pacific", "Polynesia|Fiji"],
+      ["Arctic", "Arctic|Svalbard"],
     ]],
   ]],
   ["Arts & Literature", [
     ["Books", [
-      ["Science fiction", "Science fiction novels"],
-      ["Fantasy", "Fantasy novels"],
-      ["Crime & mystery", "Crime novels"],
-      ["Poetry", "Poetry"],
+      ["Science fiction", "Science fiction|Dune (novel)"],
+      ["Fantasy", "Fantasy|The Lord of the Rings"],
+      ["Crime & mystery", "Crime fiction|Sherlock Holmes"],
+      ["Poetry", "Poetry|Sonnet"],
     ]],
     ["Visual art", [
-      ["Painting", "Paintings"],
-      ["Sculpture", "Sculptures"],
-      ["Photography", "Photography"],
-      ["Architecture styles", "Architectural styles"],
+      ["Painting", "Painting|Impressionism"],
+      ["Sculpture", "Sculpture|Michelangelo"],
+      ["Photography", "Photography|History of photography"],
+      ["Architecture styles", "Architectural style|Gothic architecture"],
     ]],
     ["Performing arts", [
-      ["Theatre", "Theatre"],
-      ["Opera", "Operas"],
-      ["Ballet", "Ballet"],
-      ["Circus", "Circus"],
+      ["Theatre", "Theatre|William Shakespeare"],
+      ["Opera", "Opera|Giuseppe Verdi"],
+      ["Ballet", "Ballet|Swan Lake"],
+      ["Circus", "Circus|Acrobatics"],
     ]],
     ["Myth & folklore", [
-      ["Greek mythology", "Greek mythology"],
-      ["Norse mythology", "Norse mythology"],
-      ["Legendary creatures", "Legendary creatures"],
-      ["Fairy tales", "Fairy tales"],
+      ["Greek mythology", "Greek mythology|Zeus"],
+      ["Norse mythology", "Norse mythology|Odin"],
+      ["Legendary creatures", "Legendary creature|Dragon"],
+      ["Fairy tales", "Fairy tale|Brothers Grimm"],
     ]],
   ]],
   ["Music, Film & Games", [
     ["Music", [
-      ["Jazz", "Jazz"],
-      ["Heavy metal", "Heavy metal music"],
-      ["Hip hop", "Hip-hop"],
-      ["Classical", "Classical music"],
+      ["Jazz", "Jazz|Miles Davis"],
+      ["Heavy metal", "Heavy metal music|Black Sabbath"],
+      ["Hip hop", "Hip-hop|Rapping"],
+      ["Classical", "Classical music|Ludwig van Beethoven"],
     ]],
     ["Film", [
-      ["Horror", "Horror films"],
-      ["Animation", "Animated films"],
+      ["Horror", "Horror film|Dracula"],
+      ["Animation", "Animation|Walt Disney"],
       ["Film noir", "Film noir"],
-      ["Documentaries", "Documentary films"],
+      ["Documentaries", "Documentary film"],
     ]],
     ["Games", [
-      ["Board games", "Board games"],
-      ["Chess", "Chess"],
-      ["Card games", "Card games"],
-      ["Role-playing", "Role-playing games"],
+      ["Board games", "Board game|Monopoly (game)"],
+      ["Chess", "Chess|Chess opening"],
+      ["Card games", "Card game|Poker"],
+      ["Role-playing", "Role-playing game|Dungeons & Dragons"],
     ]],
     ["Television", [
-      ["Sitcoms", "Sitcoms"],
-      ["Anime", "Anime"],
-      ["Sci-fi TV", "Science fiction television"],
-      ["Cartoons", "Animated television series"],
+      ["Sitcoms", "Sitcom|Friends"],
+      ["Anime", "Anime|Studio Ghibli"],
+      ["Sci-fi TV", "Star Trek|Doctor Who"],
+      ["Cartoons", "Cartoon|The Simpsons"],
     ]],
   ]],
   ["Sports", [
     ["Team sports", [
-      ["Football", "Association football"],
-      ["Basketball", "Basketball"],
-      ["Cricket", "Cricket"],
-      ["Rugby", "Rugby union"],
+      ["Football", "Association football|FIFA World Cup"],
+      ["Basketball", "Basketball|National Basketball Association"],
+      ["Cricket", "Cricket|Test cricket"],
+      ["Rugby", "Rugby union|Rugby World Cup"],
     ]],
     ["Individual sports", [
-      ["Tennis", "Tennis"],
-      ["Golf", "Golf"],
-      ["Boxing", "Boxing"],
-      ["Track and field", "Track and field"],
+      ["Tennis", "Tennis|Wimbledon Championships"],
+      ["Golf", "Golf|The Open Championship"],
+      ["Boxing", "Boxing|Muhammad Ali"],
+      ["Track and field", "Athletics (sport)|Sprint (running)"],
     ]],
     ["Outdoors", [
-      ["Mountaineering", "Mountaineering"],
+      ["Mountaineering", "Mountaineering|Mount Everest"],
       ["Surfing", "Surfing"],
       ["Skiing", "Skiing"],
-      ["Sailing", "Sailing"],
+      ["Sailing", "Sailing|America's Cup"],
     ]],
     ["Racing & Olympics", [
       ["Formula One", "Formula One"],
       ["Olympics", "Olympic Games"],
-      ["Cycling", "Cycling"],
-      ["Marathons", "Marathons"],
+      ["Cycling", "Cycling|Tour de France"],
+      ["Marathons", "Marathon"],
     ]],
   ]],
   ["Society & Mind", [
     ["Philosophy", [
-      ["Ethics", "Ethics"],
-      ["Logic", "Logic"],
-      ["Existentialism", "Existentialism"],
-      ["Stoicism", "Stoicism"],
+      ["Ethics", "Ethics|Utilitarianism"],
+      ["Logic", "Logic|Syllogism"],
+      ["Existentialism", "Existentialism|Jean-Paul Sartre"],
+      ["Stoicism", "Stoicism|Marcus Aurelius"],
     ]],
     ["Religion", [
-      ["Buddhism", "Buddhism"],
-      ["Christianity", "Christianity"],
-      ["Islam", "Islam"],
-      ["Hinduism", "Hinduism"],
+      ["Buddhism", "Buddhism|Zen"],
+      ["Christianity", "Christianity|Reformation"],
+      ["Islam", "Islam|Quran"],
+      ["Hinduism", "Hinduism|Upanishads"],
     ]],
     ["Language", [
-      ["Writing systems", "Writing systems"],
-      ["Constructed languages", "Constructed languages"],
-      ["Linguistics", "Linguistics"],
-      ["Proverbs", "Proverbs"],
+      ["Writing systems", "Writing system|Alphabet"],
+      ["Constructed languages", "Constructed language|Esperanto"],
+      ["Linguistics", "Linguistics|Phonology"],
+      ["Proverbs", "Proverb|Idiom"],
     ]],
     ["Economy", [
-      ["Economics", "Economics"],
-      ["Currencies", "Currencies"],
-      ["Trade", "International trade"],
-      ["Banking", "Banking"],
+      ["Economics", "Economics|Adam Smith"],
+      ["Currencies", "Currency|Gold standard"],
+      ["Trade", "International trade|Silk Road"],
+      ["Banking", "Bank|Central bank"],
     ]],
   ]],
 ];
@@ -479,7 +483,7 @@ const NODES = new Map();
   for (const [label, c] of list) {
     const node = {
       id: (parent ? parent.id + "/" : "") + slug(label), label, parent,
-      depth: parent ? parent.depth + 1 : 0, children: [], cat: typeof c === "string" ? c : null,
+      depth: parent ? parent.depth + 1 : 0, children: [], seeds: typeof c === "string" ? c : null,
     };
     NODES.set(node.id, node);
     if (parent) parent.children.push(node);
@@ -569,26 +573,30 @@ async function getJSON(url) {
 }
 
 const isValid = (d) => d && d.type !== "disambiguation" && typeof d.extract === "string" && d.extract.trim() !== "";
+const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const keyOf = (title) => title.replace(/ /g, "_");
 const cardKey = (d) => (d.titles && d.titles.canonical) || keyOf(d.title || "");
 
 async function searchTitles(leaf) {
-  const params = new URLSearchParams({
-    action: "query", format: "json", origin: "*", list: "search",
-    srsearch: SEARCH_MODE + ':"' + leaf.cat + '"',
-    srnamespace: "0", srlimit: String(CANDIDATES_PER_SEARCH), srsort: "random", srprop: "",
-  });
-  const j = await getJSON(ACTION_URL + "?" + params);
-  if (j.warnings) { // e.g. "Deep category query returned too many categories": results are junk
-    console.warn("search warning for", leaf.cat, j.warnings);
-    return [];
-  }
-  return ((j.query && j.query.search) || []).map((r) => r.title);
+  const query = async (offset) => {
+    const params = new URLSearchParams({
+      action: "query", format: "json", origin: "*", list: "search",
+      srsearch: "morelike:" + leaf.seeds, srnamespace: "0",
+      srlimit: String(CANDIDATES_PER_SEARCH), sroffset: String(offset), srprop: "",
+    });
+    const j = await getJSON(ACTION_URL + "?" + params);
+    return ((j.query && j.query.search) || []).map((r) => r.title).filter((t) => !SKIP_TITLE.test(t));
+  };
+  // A random page of similar articles for variety; fall back to the closest matches if it is past the end.
+  const slots = Math.floor(MAX_OFFSET / CANDIDATES_PER_SEARCH) + 1;
+  const offset = CANDIDATES_PER_SEARCH * Math.floor(Math.random() * slots);
+  const titles = await query(offset);
+  return titles.length || offset === 0 ? titles : query(0);
 }
 
 async function fetchInterestCard(leaf) {
   const seen = new Set(state.history.map((e) => e.k));
-  const titles = (await searchTitles(leaf)).filter((t) => !seen.has(keyOf(t))).slice(0, MAX_ATTEMPTS);
+  const titles = shuffle((await searchTitles(leaf)).filter((t) => !seen.has(keyOf(t)))).slice(0, MAX_ATTEMPTS);
   for (const t of titles) {
     try {
       const d = await getJSON(SUMMARY_URL + encodeURIComponent(keyOf(t)));
