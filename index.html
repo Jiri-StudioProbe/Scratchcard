@@ -21,6 +21,24 @@
     link to yet).
   - Tiny tap = small dot (a tap with no movement still scratches a circle). Strokes use
     getCoalescedEvents() when available for smoother fast swipes.
+
+  Interests + history (v2):
+  - Interests are a hand-written 3-level tree (TREE): broad theme > narrower > narrowest. Only the
+    narrowest level maps to a Wikipedia category, because broad categories blow past CirrusSearch's
+    deepcategory limit and return junk. A selected broad/mid node expands to a random leaf under it.
+  - Cards for an interest: list=search with deepcategory:"<leaf>" and srsort=random gives titles,
+    then the REST summary endpoint gives the card (so rendering and validity checks are unchanged).
+    Anything that fails falls back to the plain random summary, so the app never dead-ends.
+  - EXPLORE_RATE of cards are plain random Wikipedia, regardless of interests.
+  - History entry per card: shown -> read (Read more tapped) or ignored (New card tapped without
+    Read more). Cards left behind by closing the page stay "shown". Max scratch % is stored too.
+  - Taste weights are derived from history on the fly (no separate weight store): a read counts
+    +2, an ignore costs 0.5 scaled by how much was scratched (min 0.2, so a skip before looking
+    barely counts). Credit flows up to parents because ids are path prefixes.
+  - Every SUGGEST_EVERY cards, a "More like this?" screen offers narrower/sibling topics under what
+    you already picked (ranked by what you read), plus one new broad theme. Tapping adds it.
+  - Everything lives in localStorage (per device). Ids are slugs of the labels: renaming a label in
+    TREE orphans stored picks, which are silently dropped on load.
 -->
 <html lang="en">
 <head>
@@ -73,7 +91,7 @@
     overflow: hidden;
     transition: opacity .15s;
   }
-  .card.loading { opacity: .45; }
+  .card.loading { opacity: .45; pointer-events: none; }
 
   /* The thing hidden under the paper. One class, easy to move later. */
   .scratch-target { position: relative; }
@@ -133,6 +151,43 @@
   .btn:disabled, .btn[aria-disabled="true"] { opacity: .5; pointer-events: none; }
   .state .btn { display: inline-flex; flex: none; padding: 0 24px; background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 
+  .panel { padding: 20px 16px 16px; }
+  .panel h2 { margin: 0; font-size: 1.35rem; line-height: 1.25; }
+  .panel .step { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .panel .sub { margin: 4px 0 16px; color: var(--muted); }
+  .group { margin: 0 0 16px; }
+  .group h3 { margin: 0 0 8px; font-size: .8rem; font-weight: 600; color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    min-height: 40px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1.5px solid #cdd7d9;
+    background: #fff;
+    color: var(--ink);
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .chip small { display: block; font-size: 11px; color: var(--muted); line-height: 1.2; }
+  .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .chip[aria-pressed="true"] small { color: var(--accent-ink); opacity: .7; }
+  .panel-actions { display: flex; gap: 12px; margin-top: 8px; }
+  .panel .btn { color: var(--ink); border-color: #cdd7d9; min-height: 48px; }
+  .panel .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+  .counts { display: flex; gap: 8px; margin: 0 0 12px; flex-wrap: wrap; }
+  .hist { list-style: none; margin: 0 0 12px; padding: 0; }
+  .hist li { padding: 10px 0; border-bottom: 1px solid #e6ebec; display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; }
+  .hist a { color: var(--ink); font-weight: 600; text-decoration: none; }
+  .hist .meta { display: block; font-size: 12px; color: var(--muted); }
+  .badge { flex: none; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: #e6ebec; color: var(--muted); }
+  .badge.read { background: #d4efdc; color: #1c5a31; }
+  .badge.shown { background: #fbe9bf; color: #6b4a00; }
+
+  .tools { display: flex; justify-content: center; gap: 18px; }
+  .link { background: none; border: 0; padding: 6px 4px; font: inherit; font-size: 13px; color: rgba(255, 255, 255, .85); text-decoration: underline; cursor: pointer; }
+
   .debug { text-align: center; font-size: 12px; color: rgba(255, 255, 255, .6); min-height: 1.2em; font-variant-numeric: tabular-nums; }
   footer { text-align: center; font-size: 12px; color: rgba(255, 255, 255, .75); }
   footer a { color: inherit; }
@@ -152,6 +207,9 @@
         <strong>Couldn't fetch a card</strong>
         <button class="btn" id="retry" type="button">Try again</button>
       </div>
+      <div class="panel" id="onboard" hidden></div>
+      <div class="panel" id="suggest" hidden></div>
+      <div class="panel" id="history" hidden></div>
     </section>
 
     <div class="actions" id="actions">
@@ -159,6 +217,10 @@
       <button class="btn" id="newCard" type="button" disabled>New card</button>
     </div>
     <div class="debug" id="debug" aria-hidden="true"></div>
+    <div class="tools" id="tools">
+      <button class="link" id="openInterests" type="button">Interests</button>
+      <button class="link" id="openHistory" type="button">History</button>
+    </div>
   </main>
 
   <footer>Content from <a id="source" href="https://en.wikipedia.org/" target="_blank" rel="noopener noreferrer">Wikipedia</a>, CC BY-SA 4.0</footer>
@@ -169,6 +231,8 @@
 
 // ---- Config ---------------------------------------------------------------
 const API_URL = "https://en.wikipedia.org/api/rest_v1/page/random/summary";
+const SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/";
+const ACTION_URL = "https://en.wikipedia.org/w/api.php";
 const API_USER_AGENT = "DailyScratchcardPOC/0.1 (personal prototype)";
 const MAX_ATTEMPTS = 3;
 
@@ -178,46 +242,413 @@ const HINT_TEXT = "SCRATCH HERE";
 const PROGRESS_STEP = 8;         // sample every Nth backing-store pixel
 const SCRATCHED_ALPHA = 128;     // alpha below this counts as scratched
 
+const SUGGEST_EVERY = 3;         // show "More like this?" after this many cards
+const SUGGESTION_COUNT = 6;
+const EXPLORE_RATE = 0.15;       // share of cards that ignore interests (plain random)
+const CANDIDATES_PER_SEARCH = 20;
+const SEARCH_MODE = "deepcategory"; // CirrusSearch keyword; "incategory" = direct members only
+const HISTORY_MAX = 500;
+const HISTORY_SHOWN = 100;       // rows in the History screen
+const STORE_KEY = "scratchcard.v1";
+
 // ---- Elements -------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
 const card = $("card"), target = $("target"), content = $("content"), canvas = $("paper");
-const errorBox = $("error"), actions = $("actions"), debugEl = $("debug");
+const errorBox = $("error"), actions = $("actions"), debugEl = $("debug"), toolsEl = $("tools");
+const onboardEl = $("onboard"), suggestEl = $("suggest"), historyEl = $("history");
 const readMore = $("readMore"), newCardBtn = $("newCard"), retryBtn = $("retry"), sourceLink = $("source");
 const ctx = canvas.getContext("2d");
 
+
+// ---- Taxonomy -------------------------------------------------------------
+// node = [label, children[]] or [label, "Wikipedia category"] for a leaf.
+const TREE = [
+  ["Science & Nature", [
+    ["Space", [
+      ["Planets", "Planets of the Solar System"],
+      ["Moons", "Natural satellites of the Solar System"],
+      ["Black holes", "Black holes"],
+      ["Space probes", "Space probes"],
+    ]],
+    ["Animals", [
+      ["Dinosaurs", "Dinosaurs"],
+      ["Sharks", "Sharks"],
+      ["Birds of prey", "Birds of prey"],
+      ["Primates", "Primates"],
+    ]],
+    ["Earth", [
+      ["Volcanoes", "Volcanoes"],
+      ["Earthquakes", "Earthquakes"],
+      ["Minerals", "Minerals"],
+      ["Glaciers", "Glaciers"],
+    ]],
+    ["Matter & energy", [
+      ["Particle physics", "Particle physics"],
+      ["Quantum mechanics", "Quantum mechanics"],
+      ["Chemical elements", "Chemical elements"],
+      ["Thermodynamics", "Thermodynamics"],
+    ]],
+  ]],
+  ["Technology & Engineering", [
+    ["Computing", [
+      ["Programming languages", "Programming languages"],
+      ["Operating systems", "Operating systems"],
+      ["Artificial intelligence", "Artificial intelligence"],
+      ["Cryptography", "Cryptography"],
+    ]],
+    ["Transport", [
+      ["Aviation history", "History of aviation"],
+      ["Locomotives", "Locomotives"],
+      ["Ships", "Ship types"],
+      ["Car makers", "Automobile manufacturers"],
+    ]],
+    ["Energy", [
+      ["Nuclear power", "Nuclear power"],
+      ["Renewables", "Renewable energy"],
+      ["Oil & gas", "Petroleum industry"],
+      ["Electric power", "Electric power"],
+    ]],
+    ["Structures", [
+      ["Bridges", "Bridges"],
+      ["Skyscrapers", "Skyscrapers"],
+      ["Dams", "Dams"],
+      ["Lighthouses", "Lighthouses"],
+    ]],
+  ]],
+  ["History", [
+    ["Ancient world", [
+      ["Ancient Egypt", "Ancient Egypt"],
+      ["Ancient Rome", "Ancient Rome"],
+      ["Ancient Greece", "Ancient Greece"],
+      ["Mesopotamia", "Mesopotamia"],
+    ]],
+    ["Middle Ages", [
+      ["Crusades", "Crusades"],
+      ["Vikings", "Vikings"],
+      ["Byzantine Empire", "Byzantine Empire"],
+      ["Black Death", "Black Death"],
+    ]],
+    ["Wars", [
+      ["World War I", "World War I"],
+      ["World War II", "World War II"],
+      ["Napoleonic Wars", "Napoleonic Wars"],
+      ["Cold War", "Cold War"],
+    ]],
+    ["Ideas & discovery", [
+      ["Renaissance", "Renaissance"],
+      ["Age of Discovery", "Age of Discovery"],
+      ["Industrial Revolution", "Industrial Revolution"],
+      ["Space Race", "Space Race"],
+    ]],
+  ]],
+  ["Places & Travel", [
+    ["Natural wonders", [
+      ["Waterfalls", "Waterfalls"],
+      ["Caves", "Caves"],
+      ["Deserts", "Deserts"],
+      ["Canyons", "Canyons"],
+    ]],
+    ["Cities", [
+      ["European capitals", "Capitals in Europe"],
+      ["Asian capitals", "Capitals in Asia"],
+      ["African capitals", "Capitals in Africa"],
+      ["Ghost towns", "Ghost towns"],
+    ]],
+    ["Landmarks", [
+      ["Pyramids", "Pyramids"],
+      ["Palaces", "Palaces"],
+      ["Monasteries", "Monasteries"],
+      ["Ruins", "Ruins"],
+    ]],
+    ["Islands", [
+      ["Caribbean", "Islands of the Caribbean"],
+      ["Greek islands", "Islands of Greece"],
+      ["Pacific", "Islands of the Pacific Ocean"],
+      ["Arctic", "Islands of the Arctic Ocean"],
+    ]],
+  ]],
+  ["Arts & Literature", [
+    ["Books", [
+      ["Science fiction", "Science fiction novels"],
+      ["Fantasy", "Fantasy novels"],
+      ["Crime & mystery", "Crime novels"],
+      ["Poetry", "Poetry"],
+    ]],
+    ["Visual art", [
+      ["Painting", "Paintings"],
+      ["Sculpture", "Sculptures"],
+      ["Photography", "Photography"],
+      ["Architecture styles", "Architectural styles"],
+    ]],
+    ["Performing arts", [
+      ["Theatre", "Theatre"],
+      ["Opera", "Operas"],
+      ["Ballet", "Ballet"],
+      ["Circus", "Circus"],
+    ]],
+    ["Myth & folklore", [
+      ["Greek mythology", "Greek mythology"],
+      ["Norse mythology", "Norse mythology"],
+      ["Legendary creatures", "Legendary creatures"],
+      ["Fairy tales", "Fairy tales"],
+    ]],
+  ]],
+  ["Music, Film & Games", [
+    ["Music", [
+      ["Jazz", "Jazz"],
+      ["Heavy metal", "Heavy metal music"],
+      ["Hip hop", "Hip-hop"],
+      ["Classical", "Classical music"],
+    ]],
+    ["Film", [
+      ["Horror", "Horror films"],
+      ["Animation", "Animated films"],
+      ["Film noir", "Film noir"],
+      ["Documentaries", "Documentary films"],
+    ]],
+    ["Games", [
+      ["Board games", "Board games"],
+      ["Chess", "Chess"],
+      ["Card games", "Card games"],
+      ["Role-playing", "Role-playing games"],
+    ]],
+    ["Television", [
+      ["Sitcoms", "Sitcoms"],
+      ["Anime", "Anime"],
+      ["Sci-fi TV", "Science fiction television"],
+      ["Cartoons", "Animated television series"],
+    ]],
+  ]],
+  ["Sports", [
+    ["Team sports", [
+      ["Football", "Association football"],
+      ["Basketball", "Basketball"],
+      ["Cricket", "Cricket"],
+      ["Rugby", "Rugby union"],
+    ]],
+    ["Individual sports", [
+      ["Tennis", "Tennis"],
+      ["Golf", "Golf"],
+      ["Boxing", "Boxing"],
+      ["Athletics", "Athletics (track and field)"],
+    ]],
+    ["Outdoors", [
+      ["Mountaineering", "Mountaineering"],
+      ["Surfing", "Surfing"],
+      ["Skiing", "Skiing"],
+      ["Sailing", "Sailing"],
+    ]],
+    ["Racing & Olympics", [
+      ["Formula One", "Formula One"],
+      ["Olympics", "Olympic Games"],
+      ["Cycling", "Cycling"],
+      ["Marathons", "Marathons"],
+    ]],
+  ]],
+  ["Society & Mind", [
+    ["Philosophy", [
+      ["Ethics", "Ethics"],
+      ["Logic", "Logic"],
+      ["Existentialism", "Existentialism"],
+      ["Stoicism", "Stoicism"],
+    ]],
+    ["Religion", [
+      ["Buddhism", "Buddhism"],
+      ["Christianity", "Christianity"],
+      ["Islam", "Islam"],
+      ["Hinduism", "Hinduism"],
+    ]],
+    ["Language", [
+      ["Writing systems", "Writing systems"],
+      ["Constructed languages", "Constructed languages"],
+      ["Linguistics", "Linguistics"],
+      ["Proverbs", "Proverbs"],
+    ]],
+    ["Economy", [
+      ["Economics", "Economics"],
+      ["Currencies", "Currencies"],
+      ["Trade", "International trade"],
+      ["Banking", "Banking"],
+    ]],
+  ]],
+];
+
+const slug = (t) => t.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const NODES = new Map();
+(function build(list, parent) {
+  for (const [label, c] of list) {
+    const node = {
+      id: (parent ? parent.id + "/" : "") + slug(label), label, parent,
+      depth: parent ? parent.depth + 1 : 0, children: [], cat: typeof c === "string" ? c : null,
+    };
+    NODES.set(node.id, node);
+    if (parent) parent.children.push(node);
+    if (Array.isArray(c)) build(c, node);
+  }
+})(TREE, null);
+const ROOTS = [...NODES.values()].filter((n) => !n.parent);
+const leavesOf = (n) => (n.children.length ? n.children.flatMap(leavesOf) : [n]);
+const isUnder = (id, ancestorId) => id === ancestorId || id.startsWith(ancestorId + "/");
+const pathLabel = (n) => (n.parent ? pathLabel(n.parent) + " › " + n.label : n.label);
+
+// ---- State (localStorage) -------------------------------------------------
+function loadState() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORE_KEY));
+    if (s && typeof s === "object") {
+      return {
+        interests: (Array.isArray(s.interests) ? s.interests : []).filter((id) => NODES.has(id)),
+        history: Array.isArray(s.history) ? s.history : [],
+        sinceSuggest: s.sinceSuggest | 0,
+      };
+    }
+  } catch { /* storage unavailable or corrupt: start fresh */ }
+  return { interests: [], history: [], sinceSuggest: 0 };
+}
+const state = loadState();
+function saveState() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch { /* ignore */ }
+}
+
+// Selecting a node also selects its ancestors; deselecting drops its descendants.
+function selectNode(set, node) { for (let n = node; n; n = n.parent) set.add(n.id); }
+function deselectNode(set, node) { for (const id of [...set]) if (isUnder(id, node.id)) set.delete(id); }
+
+// The most specific picks: selected nodes with no selected child.
+function frontier(ids = state.interests) {
+  const sel = new Set(ids);
+  return ids.map((id) => NODES.get(id)).filter((n) => !n.children.some((c) => sel.has(c.id)));
+}
+
+// ---- Taste (derived from history) ----------------------------------------
+function statsFor(id) {
+  let read = 0, shown = 0, ignoredCost = 0;
+  for (const e of state.history) {
+    if (!e.node || !isUnder(e.node, id)) continue;
+    shown++;
+    if (e.out === "read") read++;
+    else if (e.out === "ignored") ignoredCost += Math.max(0.2, (e.pct || 0) / 100);
+  }
+  return { read, shown, ignoredCost };
+}
+function weightOf(id) {
+  const s = statsFor(id);
+  return Math.max(0.2, 1 + 2 * s.read - 0.5 * s.ignoredCost);
+}
+function weightedPick(items, w) {
+  const ws = items.map(w);
+  let r = Math.random() * ws.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < items.length; i++) { r -= ws[i]; if (r <= 0) return items[i]; }
+  return items[items.length - 1];
+}
+function chooseLeaf() {
+  const f = frontier();
+  if (!f.length) return null;
+  const node = weightedPick(f, (n) => weightOf(n.id));
+  return weightedPick(leavesOf(node), (l) => weightOf(l.id));
+}
+
+// ---- Data -----------------------------------------------------------------
 let useApiUserAgent = true;
 let loadToken = 0;
 
-// ---- Data -----------------------------------------------------------------
-async function fetchOnce() {
+async function getJSON(url) {
   const init = { cache: "no-store" };
   if (useApiUserAgent) init.headers = { "Api-User-Agent": API_USER_AGENT };
   let res;
   try {
-    res = await fetch(API_URL, init);
+    res = await fetch(url, init);
   } catch (err) {
     if (!useApiUserAgent) throw err;
     // Possibly a CORS preflight rejection of the courtesy header: drop it and retry once.
     useApiUserAgent = false;
-    res = await fetch(API_URL, { cache: "no-store" });
+    res = await fetch(url, { cache: "no-store" });
   }
   if (!res.ok) throw new Error("HTTP " + res.status);
   return res.json();
 }
 
 const isValid = (d) => d && d.type !== "disambiguation" && typeof d.extract === "string" && d.extract.trim() !== "";
+const keyOf = (title) => title.replace(/ /g, "_");
+const cardKey = (d) => (d.titles && d.titles.canonical) || keyOf(d.title || "");
 
-async function fetchCard() {
+async function searchTitles(leaf) {
+  const params = new URLSearchParams({
+    action: "query", format: "json", origin: "*", list: "search",
+    srsearch: SEARCH_MODE + ':"' + leaf.cat + '"',
+    srnamespace: "0", srlimit: String(CANDIDATES_PER_SEARCH), srsort: "random", srprop: "",
+  });
+  const j = await getJSON(ACTION_URL + "?" + params);
+  return ((j.query && j.query.search) || []).map((r) => r.title);
+}
+
+async function fetchInterestCard(leaf) {
+  const seen = new Set(state.history.map((e) => e.k));
+  const titles = (await searchTitles(leaf)).filter((t) => !seen.has(keyOf(t))).slice(0, MAX_ATTEMPTS);
+  for (const t of titles) {
+    try {
+      const d = await getJSON(SUMMARY_URL + encodeURIComponent(keyOf(t)));
+      if (isValid(d)) return d;
+    } catch (err) {
+      console.warn("summary failed for", t, err);
+    }
+  }
+  return null;
+}
+
+async function fetchRandom() {
   let lastErr = new Error("No valid article");
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
     try {
-      const data = await fetchOnce();
+      const data = await getJSON(API_URL);
       if (isValid(data)) return data;
     } catch (err) {
       lastErr = err;
     }
   }
   throw lastErr;
+}
+
+// Returns { data, node } where node is the leaf id the card was drawn for (null = random).
+async function fetchCard() {
+  if (frontier().length && Math.random() >= EXPLORE_RATE) {
+    for (let i = 0; i < 2; i++) {
+      const leaf = chooseLeaf();
+      try {
+        const d = await fetchInterestCard(leaf);
+        if (d) return { data: d, node: leaf.id };
+        console.warn("no unseen cards for", leaf.id);
+      } catch (err) {
+        console.warn("interest fetch failed for", leaf.id, err);
+        break;
+      }
+    }
+  }
+  return { data: await fetchRandom(), node: null };
+}
+
+// ---- History --------------------------------------------------------------
+let current = null; // history entry of the card on screen (kept until replaced)
+
+function startEntry(d, node) {
+  const e = {
+    k: cardKey(d), title: d.title || "Untitled", node, t: Date.now(), out: "shown", pct: 0,
+    url: (d.content_urls && d.content_urls.mobile && d.content_urls.mobile.page) || "",
+  };
+  state.history.push(e);
+  if (state.history.length > HISTORY_MAX) state.history.splice(0, state.history.length - HISTORY_MAX);
+  state.sinceSuggest++;
+  current = e;
+  saveState();
+}
+function markRead() {
+  if (!current) return;
+  current.out = "read";
+  current.readAt = Date.now();
+  saveState();
+}
+function leaveCard() { // New card (or anything that replaces the card) without Read more
+  if (current && current.out === "shown") { current.out = "ignored"; saveState(); }
 }
 
 // ---- Rendering ------------------------------------------------------------
@@ -266,27 +697,178 @@ async function loadCard() {
   setBusy(true);
   newCardBtn.textContent = "Shuffling…";
   try {
-    const data = await fetchCard();
+    const { data, node } = await fetchCard();
     if (token !== loadToken) return;
-    errorBox.hidden = true;
-    target.hidden = false;
-    actions.hidden = false;
+    setView("card");
     renderCard(data);
+    startEntry(data, node);
     paintPaper();
     setProgress(0, false);
   } catch (err) {
     if (token !== loadToken) return;
     console.error("Card fetch failed:", err);
-    target.hidden = true;
-    actions.hidden = true;
-    errorBox.hidden = false;
-    debugEl.textContent = "";
+    setView("error");
   } finally {
     if (token === loadToken) {
       newCardBtn.textContent = "New card";
       setBusy(false);
     }
   }
+}
+
+// ---- Views ----------------------------------------------------------------
+let view = "card", prevView = "card";
+function setView(name) {
+  if (name !== view) prevView = view;
+  view = name;
+  target.hidden = name !== "card";
+  actions.hidden = name !== "card";
+  errorBox.hidden = name !== "error";
+  onboardEl.hidden = name !== "onboard";
+  suggestEl.hidden = name !== "suggest";
+  historyEl.hidden = name !== "history";
+  toolsEl.hidden = name === "onboard" || name === "suggest";
+  if (name !== "card") debugEl.textContent = "";
+  if (name === "onboard" || name === "suggest" || name === "history") card.classList.remove("loading");
+}
+
+// Tiny element builder for the panels.
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === false || v == null) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  el.append(...kids.flat().filter((x) => x != null && x !== false));
+  return el;
+}
+function chip(node, pressed, onToggle, withPath) {
+  const b = h("button", { class: "chip", type: "button", "aria-pressed": String(pressed) },
+    node.label, withPath && node.parent ? h("small", {}, pathLabel(node.parent)) : null);
+  b.addEventListener("click", () => {
+    const now = b.getAttribute("aria-pressed") !== "true";
+    b.setAttribute("aria-pressed", String(now));
+    onToggle(now);
+  });
+  return b;
+}
+
+// ---- Onboarding: three refining steps ------------------------------------
+const STEP_TEXT = [
+  null,
+  ["What are you into?", "Pick a few broad themes."],
+  ["Narrow it down", "Pick what appeals within each theme."],
+  ["One level deeper", "Skip anything you don't care about."],
+];
+
+function showOnboarding() {
+  const editing = state.interests.length > 0;
+  const sel = new Set(state.interests);
+  const groupsFor = (step) => {
+    if (step === 1) return [{ heading: null, nodes: ROOTS }];
+    const parents = [...sel].map((id) => NODES.get(id)).filter((n) => n.depth === step - 2 && n.children.length);
+    return parents.map((n) => ({ heading: pathLabel(n), nodes: n.children }));
+  };
+  const finish = () => {
+    state.interests = [...sel];
+    state.sinceSuggest = 0;
+    saveState();
+    leaveCard();
+    loadCard();
+  };
+
+  const render = (step) => {
+    const groups = groupsFor(step);
+    const next = h("button", { class: "btn primary", type: "button" }, step === 3 ? "Start scratching" : "Continue");
+    const syncNext = () => { next.disabled = step === 1 && ![...sel].some((id) => NODES.get(id).depth === 0); };
+    next.addEventListener("click", () => {
+      if (step === 3 || (step === 2 && !groupsFor(3).length)) finish();
+      else render(step + 1);
+    });
+
+    const back = step > 1
+      ? h("button", { class: "btn", type: "button", onclick: () => render(step - 1) }, "Back")
+      : editing ? h("button", { class: "btn", type: "button", onclick: () => setView(prevView) }, "Cancel") : null;
+
+    onboardEl.replaceChildren(
+      h("div", { class: "step" }, "Step " + step + " of 3"),
+      h("h2", {}, STEP_TEXT[step][0]),
+      h("p", { class: "sub" }, STEP_TEXT[step][1]),
+      ...groups.map((g) => h("div", { class: "group" },
+        g.heading ? h("h3", {}, g.heading) : null,
+        h("div", { class: "chips" }, g.nodes.map((n) => chip(n, sel.has(n.id), (on) => {
+          if (on) selectNode(sel, n); else deselectNode(sel, n);
+          syncNext();
+        }))))),
+      h("div", { class: "panel-actions" }, back, next),
+    );
+    syncNext();
+  };
+
+  setView("onboard");
+  render(1);
+}
+
+// ---- Suggestions: "More like this?" --------------------------------------
+function suggestionCandidates() {
+  const sel = new Set(state.interests);
+  const kids = [];
+  for (const id of sel) {
+    for (const c of NODES.get(id).children) {
+      if (!sel.has(c.id)) kids.push({ n: c, score: 1 + 0.5 * statsFor(id).read + Math.random() });
+    }
+  }
+  kids.sort((a, b) => b.score - a.score);
+  const roots = ROOTS.filter((r) => !sel.has(r.id));
+  const out = kids.slice(0, roots.length ? SUGGESTION_COUNT - 1 : SUGGESTION_COUNT).map((x) => x.n);
+  if (roots.length) out.push(roots[Math.floor(Math.random() * roots.length)]);
+  return out;
+}
+
+function showSuggest() {
+  const nodes = suggestionCandidates();
+  if (!nodes.length) return false;
+  const carryOn = () => { state.sinceSuggest = 0; saveState(); loadCard(); };
+  suggestEl.replaceChildren(
+    h("h2", {}, "More like this?"),
+    h("p", { class: "sub" }, "Tap anything that sounds good and we'll mix it in."),
+    h("div", { class: "group" }, h("div", { class: "chips" }, nodes.map((n) => chip(n, false, (on) => {
+      if (!on) return;
+      const sel = new Set(state.interests);
+      selectNode(sel, n);
+      state.interests = [...sel];
+      saveState();
+    }, true)))),
+    h("div", { class: "panel-actions" }, h("button", { class: "btn primary", type: "button", onclick: carryOn }, "Keep scratching")),
+  );
+  setView("suggest");
+  return true;
+}
+
+// ---- History screen -------------------------------------------------------
+function showHistory() {
+  const hist = state.history;
+  const n = (out) => hist.filter((e) => e.out === out).length;
+  const fmt = (t) => new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const rows = hist.slice(-HISTORY_SHOWN).reverse().map((e) => h("li", {},
+    h("div", {},
+      e.url ? h("a", { href: e.url, target: "_blank", rel: "noopener noreferrer" }, e.title) : e.title,
+      h("span", { class: "meta" },
+        (e.node && NODES.has(e.node) ? pathLabel(NODES.get(e.node)) : "random") + " · " + fmt(e.t) + " · " + (e.pct || 0) + "% scratched")),
+    h("span", { class: "badge " + e.out }, e.out)));
+  historyEl.replaceChildren(
+    h("h2", {}, "History"),
+    h("p", { class: "sub" }, hist.length + " cards: " + n("read") + " read, " + n("ignored") + " ignored, " + n("shown") + " left open."),
+    hist.length ? h("ul", { class: "hist" }, rows) : h("p", { class: "sub" }, "Nothing yet."),
+    h("div", { class: "panel-actions" },
+      h("button", { class: "btn", type: "button", onclick: () => setView(prevView) }, "Back"),
+      hist.length ? h("button", { class: "btn", type: "button", onclick: () => {
+        if (confirm("Clear all history?")) { state.history = []; current = null; saveState(); showHistory(); }
+      } }, "Clear") : null),
+  );
+  setView("history");
 }
 
 // ---- Paper ----------------------------------------------------------------
@@ -452,15 +1034,30 @@ function measureProgress() {
       if (data[(y * width + x) * 4 + 3] < SCRATCHED_ALPHA) cleared++;
     }
   }
-  setProgress(total ? Math.round((cleared / total) * 100) : 0);
+  const pct = total ? Math.round((cleared / total) * 100) : 0;
+  setProgress(pct);
+  if (current) { current.pct = Math.max(current.pct || 0, pct); saveState(); }
 }
 
 // ---- Wiring ---------------------------------------------------------------
-newCardBtn.addEventListener("click", loadCard);
+newCardBtn.addEventListener("click", () => {
+  leaveCard();
+  if (state.sinceSuggest >= SUGGEST_EVERY) {
+    if (showSuggest()) return;
+    state.sinceSuggest = 0; // nothing left to suggest
+  }
+  loadCard();
+});
 retryBtn.addEventListener("click", loadCard);
-readMore.addEventListener("click", (e) => { if (readMore.getAttribute("aria-disabled") === "true") e.preventDefault(); });
+readMore.addEventListener("click", (e) => {
+  if (readMore.getAttribute("aria-disabled") === "true") { e.preventDefault(); return; }
+  markRead();
+});
+readMore.addEventListener("auxclick", markRead); // middle-click opens a tab too
+$("openInterests").addEventListener("click", showOnboarding);
+$("openHistory").addEventListener("click", showHistory);
 
-loadCard();
+if (state.interests.length) loadCard(); else showOnboarding();
 </script>
 </body>
 </html>
